@@ -1,39 +1,47 @@
 ---- MODULE exactly_once_none_atomic ----
 EXTENDS TLC, Integers, Sequences, FiniteSets
-CONSTANTS MaxQueue, MaxRetry, NULL, EMPTY
+CONSTANTS MessageCount, DupCount, NULL, EMPTY, COMMITTED
 
 Range(T) == { T[x] : x \in DOMAIN T }
 IsEmpty(T) == Cardinality(T) = 0
+WithId(T, id) == { x \in T: x.msgId = id }
+
+Processes == 1..2
+MessageIds == 1..MessageCount
+DupIds == 1..DupCount
+VersionIds == 0..2*MessageCount
 
 (*--algorithm outbox
 variables
-    inputQueue = { [id |-> x, retryNo |-> 0] : x \in 1..MaxQueue },
-    store = [history |-> <<[ver |-> 0, msgId |-> 0]>>, ver |-> 0, tx |-> NULL], 
-    outbox = [r \in 1..MaxQueue |-> NULL],
+    inputQueue = [id : MessageIds, dupId : DupIds],
+    store = [history |-> <<>>, ver |-> 0, tx |-> NULL], 
+    outbox = [r \in MessageIds |-> [state |-> NULL, out |-> NULL]],
     output = { },
     processed = { }
 
 define 
-    Processes == 1..2
-    MessageIds == 1..MaxQueue
-    IdRange == 0..MaxQueue
-    OutputMessages == {[id |-> i, ver |-> v] : i \in MessageIds, v \in IdRange }
-    OutboxEntries == {NULL, EMPTY} \union OutputMessages
+    InputMessages == [id : MessageIds, dupId : DupIds]
+    OutputMessages == [msgId : MessageIds, ver : VersionIds]
+    OutboxEntries == [state : {NULL, COMMITTED}, out : OutputMessages \union {NULL}]
     TypeInvariant == 
-        /\ \A le \in Range(store.log) : le \in {[ver |-> v, msgId |-> i]: v \in IdRange, i \in IdRange }
-        /\ \A oe \in Range(store.outbox) : oe \in OutboxEntries
-        /\ inputQueue \in SUBSET [id : 1..MaxQueue, retryNo : 0..MaxRetry]
-    
+        /\ inputQueue \in SUBSET InputMessages
+        /\ output \in SUBSET OutputMessages
+        /\ processed \in SUBSET InputMessages
+        /\ store.ver \in VersionIds
+        /\ store.tx \in (MessageIds \union {NULL})
+        /\ Range(store.history) \in SUBSET [ver : VersionIds, msgId : MessageIds ]
+        /\ Range(outbox) \in SUBSET OutboxEntries
+
     AtMostOneStateChange ==
-        \A id \in MessageIds : Cardinality({le \in Range(store.log) : le.msgId = id}) <= 1
+        \A id \in MessageIds : Cardinality(WithId(Range(store.history),id)) <= 1
     
     AtMostOneOutputMsg ==
-        \A id \in MessageIds : Cardinality({o \in output: o.id = id}) <= 1
-    
+        \A id \in MessageIds : Cardinality(WithId(output, id)) <= 1
+
     ConsistentStateAndOutput ==
-        LET s(id) == CHOOSE le \in Range(store.log) : le.msgId = id 
-            o(id) == CHOOSE o \in output : o.id = id
-        IN \A m \in processed: s(m.id).ver = o(m.id).ver
+        LET InState(id)  == CHOOSE x \in WithId(Range(store.history), id) : TRUE
+            InOutput(id) == CHOOSE x \in WithId(output, id) : TRUE
+        IN \A m \in processed: InState(m.id).ver = InOutput(m.id).ver
     
     Safety == AtMostOneStateChange /\ AtMostOneOutputMsg /\ ConsistentStateAndOutput
 
@@ -42,38 +50,42 @@ define
 end define;
 
 macro Rollback() begin
-    if msg.retryNo < MaxRetry then
-        msg.retryNo := msg.retryNo + 1;  
-        inputQueue := inputQueue \union {msg};
-    end if; 
     goto MainLoop;
 end macro;
 
-procedure FinishTx(msgId, stateVer) begin
-FinishTx_UpdateOutbox:
+macro CommitOutbox(msgId) begin
     outbox[msgId].state := COMMITTED;
+end macro;
 
-FinishTx_UpdateState:
-    (*if store.ver = stateVer then*)
+macro CommitState(state) begin
+    if store.ver + 1 = state.ver then
+        either
+            store := state;
+        or
+            Rollback();
+        end either;
+    else
+        Rollback();
+    end if;
+end macro;
+
+macro CleanupState(state) begin
+    if store.ver = state.ver then
         either
             store.tx := NULL || store.ver := store.ver + 1;
         or
             Rollback();
         end either;
-    (*else 
+    else
         Rollback();
-    end if;*)
-Test_2:
-    return;
-end procedure;
+    end if;
+end macro;
 
 fair process HandlerThread \in Processes
 variables
     msg,
     state, 
-    nextState,
-    outboxRecord,
-    outputMsg
+    nextState
 begin
 MainLoop:
     while TRUE do
@@ -84,211 +96,189 @@ MainLoop:
             inputQueue := { i \in inputQueue : i /= m};
             msg := m;
         end with;
-    
-    LoadState:
+
         state := store;
 
-        if outbox[msg.id] = NULL then
-            if (state.tx /= NULL) then
-                call FinishTx(msg.id, state.ver)
-            end if;
+        if(state.tx /= NULL) then
+        Redo_OutboxCommit:
+            CommitOutbox(state.tx);
+        Redo_StateCommit:
+            CleanupState(state);
+        end if;
 
-        Process:
+    Process:
+        if outbox[msg.id].state = NULL then
+            
             state.history := <<[msgId |-> msg.id, ver |-> state.ver + 1]>> \o state.history ||
             state.tx := msg.id ||
             state.ver := state.ver + 1;
-            
-        UpdateOutbox:
-            outbox[msg.id].out := [msgId |-> msg.id, ver |-> state.ver + 1];
 
-        CommitTx:
-            if store.ver + 1 = state.ver then
-                either
-                   store := state;
-                or
-                    Rollback();
-                end either;
-            else 
-                Rollback();
-            end if;    
-        Test:
-            call FinishTx(msg.id, state.ver);
+        StageOutbox:
+            outbox[msg.id].out := [msgId |-> msg.id, ver |-> state.ver];
+
+        StateCommit:
+            CommitState(state);
+            
+        OutboxCommit:
+            CommitOutbox(msg.id);
+
+        StateCleanup:
+            CleanupState(state);
         end if;
 
-    SendOutMsg:
-        if outbox[msg.id].out /= EMPTY then
-            either
-                output := output \union {outbox[msg.id].out};
-            or
-                Rollback();
-            end either;
-        end if;
-
-    UpdateOutbox:
-        either
-            store.outbox[msg.id].out := EMPTY
-        or
-            Rollback();
-        end either;
+    SendAndAck:
+        output := output \union {outbox[msg.id].out};
+        processed := processed \union {msg};
             
-    AckInMsg:
-        either
-            processed := processed \union {msg};
-        or 
-            Rollback();
-        end either;
     end while;
 end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION
 CONSTANT defaultInitValue
-VARIABLES inputQueue, store, output, pc
+VARIABLES inputQueue, store, outbox, output, processed, pc
 
 (* define statement *)
-Processes == 1..2
-MessageIds == 1..MaxQueue
-IdRange == 0..MaxQueue
-OutputMessages == {[id |-> i, ver |-> v] : i \in MessageIds, v \in IdRange }
-OutboxEntries == {NULL, EMPTY} \union OutputMessages
+InputMessages == [id : MessageIds, dupId : DupIds]
+OutputMessages == [msgId : MessageIds, ver : VersionIds]
+OutboxEntries == [state : {NULL, COMMITTED}, out : OutputMessages \union {NULL}]
 TypeInvariant ==
-    /\ \A le \in Range(store.log) : le \in {[ver |-> v, msgId |-> i]: v \in IdRange, i \in IdRange }
-    /\ \A oe \in Range(store.outbox) : oe \in OutboxEntries
-    /\ inputQueue \in SUBSET [id : 1..MaxQueue, retryNo : 0..MaxRetry]
+    /\ inputQueue \in SUBSET InputMessages
+    /\ output \in SUBSET OutputMessages
+    /\ processed \in SUBSET InputMessages
+    /\ store.ver \in VersionIds
+    /\ store.tx \in (MessageIds \union {NULL})
+    /\ Range(store.history) \in SUBSET [ver : VersionIds, msgId : MessageIds ]
+    /\ Range(outbox) \in SUBSET OutboxEntries
 
-SingleStateChange ==
-    \A id \in MessageIds : Cardinality({le \in Range(store.log) : le.msgId = id}) <= 1
+AtMostOneStateChange ==
+    \A id \in MessageIds : Cardinality(WithId(Range(store.history),id)) <= 1
 
-SingleOutputMsg ==
-    \A id \in MessageIds : Cardinality({o \in output: o.id = id}) <= 1
+AtMostOneOutputMsg ==
+    \A id \in MessageIds : Cardinality(WithId(output, id)) <= 1
 
 ConsistentStateAndOutput ==
-    \A id \in MessageIds : (\E le \in Range(store.log) : le.msgId = id /\ \E o \in output : o.id = id)
-                            =>
-                           (CHOOSE x \in Range(store.log) : x.msgId = id).ver = (CHOOSE x \in output : x.id = id).ver
+    LET InState(id)  == CHOOSE x \in WithId(Range(store.history), id) : TRUE
+        InOutput(id) == CHOOSE x \in WithId(output, id) : TRUE
+    IN \A m \in processed: InState(m.id).ver = InOutput(m.id).ver
 
-
-Safety == SingleStateChange /\ SingleOutputMsg /\ ConsistentStateAndOutput
+Safety == AtMostOneStateChange /\ AtMostOneOutputMsg /\ ConsistentStateAndOutput
 
 Termination == <>(/\ \A self \in Processes: pc[self] = "LockInMsg"
                   /\ IsEmpty(inputQueue))
 
-VARIABLES msg, state, nState, outbox, outboxRecord, outputMsg
+VARIABLES msg, state, nextState
 
-vars == << inputQueue, store, output, pc, msg, state, nState, outbox, 
-           outboxRecord, outputMsg >>
+vars == << inputQueue, store, outbox, output, processed, pc, msg, state, 
+           nextState >>
 
 ProcSet == (Processes)
 
 Init == (* Global variables *)
-        /\ inputQueue = { [id |-> x, retryNo |-> 0] : x \in 1..MaxQueue }
-        /\ store = [log    |-> <<[ver |-> 0, msgId |-> 0]>>,
-                    outbox |-> [r \in 1..MaxQueue |-> NULL]]
+        /\ inputQueue = [id : MessageIds, dupId : DupIds]
+        /\ store = [history |-> <<>>, ver |-> 0, tx |-> NULL]
+        /\ outbox = [r \in MessageIds |-> [state |-> NULL, out |-> NULL]]
         /\ output = { }
+        /\ processed = { }
         (* Process HandlerThread *)
         /\ msg = [self \in Processes |-> defaultInitValue]
         /\ state = [self \in Processes |-> defaultInitValue]
-        /\ nState = [self \in Processes |-> defaultInitValue]
-        /\ outbox = [self \in Processes |-> defaultInitValue]
-        /\ outboxRecord = [self \in Processes |-> defaultInitValue]
-        /\ outputMsg = [self \in Processes |-> defaultInitValue]
+        /\ nextState = [self \in Processes |-> defaultInitValue]
         /\ pc = [self \in ProcSet |-> "MainLoop"]
 
 MainLoop(self) == /\ pc[self] = "MainLoop"
                   /\ pc' = [pc EXCEPT ![self] = "LockInMsg"]
-                  /\ UNCHANGED << inputQueue, store, output, msg, state, 
-                                  nState, outbox, outboxRecord, outputMsg >>
+                  /\ UNCHANGED << inputQueue, store, outbox, output, processed, 
+                                  msg, state, nextState >>
 
 LockInMsg(self) == /\ pc[self] = "LockInMsg"
                    /\ ~ IsEmpty(inputQueue)
                    /\ \E m \in inputQueue:
                         /\ inputQueue' = { i \in inputQueue : i /= m}
                         /\ msg' = [msg EXCEPT ![self] = m]
-                   /\ pc' = [pc EXCEPT ![self] = "LoadState"]
-                   /\ UNCHANGED << store, output, state, nState, outbox, 
-                                   outboxRecord, outputMsg >>
+                   /\ state' = [state EXCEPT ![self] = store]
+                   /\ IF (state'[self].tx /= NULL)
+                         THEN /\ pc' = [pc EXCEPT ![self] = "Redo_OutboxCommit"]
+                         ELSE /\ pc' = [pc EXCEPT ![self] = "Process"]
+                   /\ UNCHANGED << store, outbox, output, processed, nextState >>
 
-LoadState(self) == /\ pc[self] = "LoadState"
-                   /\ state' = [state EXCEPT ![self] = Head(store.log)]
-                   /\ outbox' = [outbox EXCEPT ![self] = store.outbox]
-                   /\ IF outbox'[self][msg[self].id] = NULL
-                         THEN /\ pc' = [pc EXCEPT ![self] = "Process"]
-                         ELSE /\ pc' = [pc EXCEPT ![self] = "SendOutMsg"]
-                   /\ UNCHANGED << inputQueue, store, output, msg, nState, 
-                                   outboxRecord, outputMsg >>
+Redo_OutboxCommit(self) == /\ pc[self] = "Redo_OutboxCommit"
+                           /\ outbox' = [outbox EXCEPT ![(state[self].tx)].state = COMMITTED]
+                           /\ pc' = [pc EXCEPT ![self] = "Redo_StateCommit"]
+                           /\ UNCHANGED << inputQueue, store, output, 
+                                           processed, msg, state, nextState >>
+
+Redo_StateCommit(self) == /\ pc[self] = "Redo_StateCommit"
+                          /\ IF store.ver = state[self].ver
+                                THEN /\ \/ /\ store' = [store EXCEPT !.tx = NULL,
+                                                                     !.ver = store.ver + 1]
+                                           /\ pc' = [pc EXCEPT ![self] = "Process"]
+                                        \/ /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
+                                           /\ store' = store
+                                ELSE /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
+                                     /\ store' = store
+                          /\ UNCHANGED << inputQueue, outbox, output, 
+                                          processed, msg, state, nextState >>
 
 Process(self) == /\ pc[self] = "Process"
-                 /\ outputMsg' = [outputMsg EXCEPT ![self] = [id |-> msg[self].id, ver |-> state[self].ver + 1]]
-                 /\ nState' = [nState EXCEPT ![self] = [msgId |-> msg[self].id, ver |-> state[self].ver + 1]]
-                 /\ IF Head(store.log).ver = state[self].ver
-                       THEN /\ \/ /\ store' = [store EXCEPT !.log = Append(store.log, nState'[self])]
-                                  /\ outbox' = [outbox EXCEPT ![self][msg[self].id] = outputMsg'[self]]
-                                  /\ pc' = [pc EXCEPT ![self] = "SendOutMsg"]
-                                  /\ UNCHANGED <<inputQueue, msg>>
-                               \/ /\ IF msg[self].retryNo < MaxRetry
-                                        THEN /\ msg' = [msg EXCEPT ![self].retryNo = msg[self].retryNo + 1]
-                                             /\ inputQueue' = (inputQueue \union {msg'[self]})
-                                        ELSE /\ TRUE
-                                             /\ UNCHANGED << inputQueue, msg >>
-                                  /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
-                                  /\ UNCHANGED <<store, outbox>>
-                       ELSE /\ IF msg[self].retryNo < MaxRetry
-                                  THEN /\ msg' = [msg EXCEPT ![self].retryNo = msg[self].retryNo + 1]
-                                       /\ inputQueue' = (inputQueue \union {msg'[self]})
-                                  ELSE /\ TRUE
-                                       /\ UNCHANGED << inputQueue, msg >>
-                            /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
-                            /\ UNCHANGED << store, outbox >>
-                 /\ UNCHANGED << output, state, outboxRecord >>
+                 /\ IF outbox[msg[self].id].state = NULL
+                       THEN /\ state' = [state EXCEPT ![self].history = <<[msgId |-> msg[self].id, ver |-> state[self].ver + 1]>> \o state[self].history,
+                                                      ![self].tx = msg[self].id,
+                                                      ![self].ver = state[self].ver + 1]
+                            /\ pc' = [pc EXCEPT ![self] = "StageOutbox"]
+                       ELSE /\ pc' = [pc EXCEPT ![self] = "SendAndAck"]
+                            /\ state' = state
+                 /\ UNCHANGED << inputQueue, store, outbox, output, processed, 
+                                 msg, nextState >>
 
-SendOutMsg(self) == /\ pc[self] = "SendOutMsg"
-                    /\ IF outbox[self][msg[self].id] /= EMPTY
-                          THEN /\ \/ /\ output' = (output \union {outputMsg[self]})
-                                     /\ pc' = [pc EXCEPT ![self] = "UpdateOutbox"]
-                                     /\ UNCHANGED <<inputQueue, msg>>
-                                  \/ /\ IF msg[self].retryNo < MaxRetry
-                                           THEN /\ msg' = [msg EXCEPT ![self].retryNo = msg[self].retryNo + 1]
-                                                /\ inputQueue' = (inputQueue \union {msg'[self]})
-                                           ELSE /\ TRUE
-                                                /\ UNCHANGED << inputQueue, 
-                                                                msg >>
-                                     /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
-                                     /\ UNCHANGED output
-                          ELSE /\ pc' = [pc EXCEPT ![self] = "UpdateOutbox"]
-                               /\ UNCHANGED << inputQueue, output, msg >>
-                    /\ UNCHANGED << store, state, nState, outbox, outboxRecord, 
-                                    outputMsg >>
+StageOutbox(self) == /\ pc[self] = "StageOutbox"
+                     /\ outbox' = [outbox EXCEPT ![msg[self].id].out = [msgId |-> msg[self].id, ver |-> state[self].ver]]
+                     /\ pc' = [pc EXCEPT ![self] = "StateCommit"]
+                     /\ UNCHANGED << inputQueue, store, output, processed, msg, 
+                                     state, nextState >>
 
-UpdateOutbox(self) == /\ pc[self] = "UpdateOutbox"
-                      /\ \/ /\ store' = [store EXCEPT !.outbox[msg[self].id] = EMPTY]
-                            /\ pc' = [pc EXCEPT ![self] = "AckInMsg"]
-                            /\ UNCHANGED <<inputQueue, msg>>
-                         \/ /\ IF msg[self].retryNo < MaxRetry
-                                  THEN /\ msg' = [msg EXCEPT ![self].retryNo = msg[self].retryNo + 1]
-                                       /\ inputQueue' = (inputQueue \union {msg'[self]})
-                                  ELSE /\ TRUE
-                                       /\ UNCHANGED << inputQueue, msg >>
-                            /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
-                            /\ store' = store
-                      /\ UNCHANGED << output, state, nState, outbox, 
-                                      outboxRecord, outputMsg >>
+StateCommit(self) == /\ pc[self] = "StateCommit"
+                     /\ IF store.ver + 1 = state[self].ver
+                           THEN /\ \/ /\ store' = state[self]
+                                      /\ pc' = [pc EXCEPT ![self] = "OutboxCommit"]
+                                   \/ /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
+                                      /\ store' = store
+                           ELSE /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
+                                /\ store' = store
+                     /\ UNCHANGED << inputQueue, outbox, output, processed, 
+                                     msg, state, nextState >>
 
-AckInMsg(self) == /\ pc[self] = "AckInMsg"
-                  /\ \/ /\ TRUE
-                        /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
-                        /\ UNCHANGED <<inputQueue, msg>>
-                     \/ /\ IF msg[self].retryNo < MaxRetry
-                              THEN /\ msg' = [msg EXCEPT ![self].retryNo = msg[self].retryNo + 1]
-                                   /\ inputQueue' = (inputQueue \union {msg'[self]})
-                              ELSE /\ TRUE
-                                   /\ UNCHANGED << inputQueue, msg >>
-                        /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
-                  /\ UNCHANGED << store, output, state, nState, outbox, 
-                                  outboxRecord, outputMsg >>
+OutboxCommit(self) == /\ pc[self] = "OutboxCommit"
+                      /\ outbox' = [outbox EXCEPT ![(msg[self].id)].state = COMMITTED]
+                      /\ pc' = [pc EXCEPT ![self] = "StateCleanup"]
+                      /\ UNCHANGED << inputQueue, store, output, processed, 
+                                      msg, state, nextState >>
 
-HandlerThread(self) == MainLoop(self) \/ LockInMsg(self) \/ LoadState(self)
-                          \/ Process(self) \/ SendOutMsg(self)
-                          \/ UpdateOutbox(self) \/ AckInMsg(self)
+StateCleanup(self) == /\ pc[self] = "StateCleanup"
+                      /\ IF store.ver = state[self].ver
+                            THEN /\ \/ /\ store' = [store EXCEPT !.tx = NULL,
+                                                                 !.ver = store.ver + 1]
+                                       /\ pc' = [pc EXCEPT ![self] = "SendAndAck"]
+                                    \/ /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
+                                       /\ store' = store
+                            ELSE /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
+                                 /\ store' = store
+                      /\ UNCHANGED << inputQueue, outbox, output, processed, 
+                                      msg, state, nextState >>
+
+SendAndAck(self) == /\ pc[self] = "SendAndAck"
+                    /\ output' = (output \union {outbox[msg[self].id].out})
+                    /\ processed' = (processed \union {msg[self]})
+                    /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
+                    /\ UNCHANGED << inputQueue, store, outbox, msg, state, 
+                                    nextState >>
+
+HandlerThread(self) == MainLoop(self) \/ LockInMsg(self)
+                          \/ Redo_OutboxCommit(self)
+                          \/ Redo_StateCommit(self) \/ Process(self)
+                          \/ StageOutbox(self) \/ StateCommit(self)
+                          \/ OutboxCommit(self) \/ StateCleanup(self)
+                          \/ SendAndAck(self)
 
 Next == (\E self \in Processes: HandlerThread(self))
 

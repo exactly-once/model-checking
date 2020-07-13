@@ -1,0 +1,8 @@
+
+states/
+
+*.dot
+
+*.old
+
+*.out

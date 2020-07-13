@@ -15,43 +15,43 @@ TxIdx == 1..MessageCount*DupCount
 (*--algorithm outbox
 variables
     inputQueue = [id : MessageIds, dupId : DupIds],
+    outQueue = { },
     store = [history |-> <<>>, ver |-> 0, tx |-> NULL], 
     outbox = [r \in MessageIds |-> NULL],
     outboxStagging = [t \in TxIdx |-> NULL],
-    output = { },
     processed = { }
 
 define 
     InputMessages == [id : MessageIds, dupId : DupIds]
-    OutputMessages == [msgId : MessageIds, ver : VersionIds]
+    outQueueMessages == [msgId : MessageIds, ver : VersionIds]
     TypeInvariant == 
         /\ inputQueue \in SUBSET InputMessages
-        /\ output \in SUBSET OutputMessages
+        /\ outQueue \in SUBSET outQueueMessages
         /\ processed \in SUBSET InputMessages
         /\ store.ver \in VersionIds
         /\ store.tx \in (TxIdx \union {NULL})
         /\ Range(store.history) \in SUBSET [ver : VersionIds, msgId : MessageIds ]
-        /\ Range(outbox) \in SUBSET (OutputMessages \union {NULL})
-        /\ Range(outboxStagging) \in SUBSET (OutputMessages \union {NULL})
+        /\ Range(outbox) \in SUBSET (outQueueMessages \union {NULL})
+        /\ Range(outboxStagging) \in SUBSET (outQueueMessages \union {NULL})
 
     AtMostOneStateChange ==
         \A id \in MessageIds : Cardinality(WithId(Range(store.history),id)) <= 1
     
-    AtMostOneOutputMsg ==
-        \A id \in MessageIds : Cardinality(WithId(output, id)) <= 1
+    AtMostOneoutQueueMsg ==
+        \A id \in MessageIds : Cardinality(WithId(outQueue, id)) <= 1
 
-    ConsistentStateAndOutput ==
+    ConsistentStateAndoutQueue ==
         LET InState(id)  == CHOOSE x \in WithId(Range(store.history), id) : TRUE
-            InOutput(id) == CHOOSE x \in WithId(output, id) : TRUE
-        IN \A m \in processed: InState(m.id).ver = InOutput(m.id).ver
+            InoutQueue(id) == CHOOSE x \in WithId(outQueue, id) : TRUE
+        IN \A m \in processed: InState(m.id).ver = InoutQueue(m.id).ver
     
-    Safety == AtMostOneStateChange /\ AtMostOneOutputMsg /\ ConsistentStateAndOutput
+    Safety == AtMostOneStateChange /\ AtMostOneoutQueueMsg /\ ConsistentStateAndoutQueue
 
     Termination == <>(/\ \A self \in Processes: pc[self] = "LockInMsg"
                       /\ IsEmpty(inputQueue))
 end define;
 
-macro Rollback() begin
+macro Fail() begin
     goto MainLoop;
 end macro;
 
@@ -66,10 +66,10 @@ macro CommitState(state) begin
         either
             store := state;
         or
-            Rollback();
+            Fail();
         end either;
     else
-        Rollback();
+        Fail();
     end if;
 end macro;
 
@@ -78,10 +78,10 @@ macro CleanupState(state) begin
         either
             store.tx := NULL || store.ver := store.ver + 1;
         or
-            Rollback();
+            Fail();
         end either;
     else
-        Rollback();
+        Fail();
     end if;
 end macro;
 
@@ -133,59 +133,59 @@ MainLoop:
         end if;
 
     SendAndAck:
-        output := output \union {outbox[msg.id]};
+        outQueue := outQueue \union {outbox[msg.id]};
         processed := processed \union {msg};
             
     end while;
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION
+\* BEGIN TRANSLATION - the hash of the PCal code: PCal-4f58ef387108de1fcc75c2eaf85ad2a0
 CONSTANT defaultInitValue
-VARIABLES inputQueue, store, outbox, outboxStagging, output, processed, pc
+VARIABLES inputQueue, outQueue, store, outbox, outboxStagging, processed, pc
 
 (* define statement *)
 InputMessages == [id : MessageIds, dupId : DupIds]
-OutputMessages == [msgId : MessageIds, ver : VersionIds]
+outQueueMessages == [msgId : MessageIds, ver : VersionIds]
 TypeInvariant ==
     /\ inputQueue \in SUBSET InputMessages
-    /\ output \in SUBSET OutputMessages
+    /\ outQueue \in SUBSET outQueueMessages
     /\ processed \in SUBSET InputMessages
     /\ store.ver \in VersionIds
     /\ store.tx \in (TxIdx \union {NULL})
     /\ Range(store.history) \in SUBSET [ver : VersionIds, msgId : MessageIds ]
-    /\ Range(outbox) \in SUBSET (OutputMessages \union {NULL})
-    /\ Range(outboxStagging) \in SUBSET (OutputMessages \union {NULL})
+    /\ Range(outbox) \in SUBSET (outQueueMessages \union {NULL})
+    /\ Range(outboxStagging) \in SUBSET (outQueueMessages \union {NULL})
 
 AtMostOneStateChange ==
     \A id \in MessageIds : Cardinality(WithId(Range(store.history),id)) <= 1
 
-AtMostOneOutputMsg ==
-    \A id \in MessageIds : Cardinality(WithId(output, id)) <= 1
+AtMostOneoutQueueMsg ==
+    \A id \in MessageIds : Cardinality(WithId(outQueue, id)) <= 1
 
-ConsistentStateAndOutput ==
+ConsistentStateAndoutQueue ==
     LET InState(id)  == CHOOSE x \in WithId(Range(store.history), id) : TRUE
-        InOutput(id) == CHOOSE x \in WithId(output, id) : TRUE
-    IN \A m \in processed: InState(m.id).ver = InOutput(m.id).ver
+        InoutQueue(id) == CHOOSE x \in WithId(outQueue, id) : TRUE
+    IN \A m \in processed: InState(m.id).ver = InoutQueue(m.id).ver
 
-Safety == AtMostOneStateChange /\ AtMostOneOutputMsg /\ ConsistentStateAndOutput
+Safety == AtMostOneStateChange /\ AtMostOneoutQueueMsg /\ ConsistentStateAndoutQueue
 
 Termination == <>(/\ \A self \in Processes: pc[self] = "LockInMsg"
                   /\ IsEmpty(inputQueue))
 
 VARIABLES txId, msg, state, nextState
 
-vars == << inputQueue, store, outbox, outboxStagging, output, processed, pc, 
+vars == << inputQueue, outQueue, store, outbox, outboxStagging, processed, pc, 
            txId, msg, state, nextState >>
 
 ProcSet == (Processes)
 
 Init == (* Global variables *)
         /\ inputQueue = [id : MessageIds, dupId : DupIds]
+        /\ outQueue = { }
         /\ store = [history |-> <<>>, ver |-> 0, tx |-> NULL]
         /\ outbox = [r \in MessageIds |-> NULL]
         /\ outboxStagging = [t \in TxIdx |-> NULL]
-        /\ output = { }
         /\ processed = { }
         (* Process HandlerThread *)
         /\ txId = [self \in Processes |-> defaultInitValue]
@@ -196,8 +196,8 @@ Init == (* Global variables *)
 
 MainLoop(self) == /\ pc[self] = "MainLoop"
                   /\ pc' = [pc EXCEPT ![self] = "LockInMsg"]
-                  /\ UNCHANGED << inputQueue, store, outbox, outboxStagging, 
-                                  output, processed, txId, msg, state, 
+                  /\ UNCHANGED << inputQueue, outQueue, store, outbox, 
+                                  outboxStagging, processed, txId, msg, state, 
                                   nextState >>
 
 LockInMsg(self) == /\ pc[self] = "LockInMsg"
@@ -209,16 +209,16 @@ LockInMsg(self) == /\ pc[self] = "LockInMsg"
                    /\ IF (state'[self].tx /= NULL)
                          THEN /\ pc' = [pc EXCEPT ![self] = "Redo_OutboxCommit"]
                          ELSE /\ pc' = [pc EXCEPT ![self] = "Process"]
-                   /\ UNCHANGED << store, outbox, outboxStagging, output, 
+                   /\ UNCHANGED << outQueue, store, outbox, outboxStagging, 
                                    processed, txId, nextState >>
 
 Redo_OutboxCommit(self) == /\ pc[self] = "Redo_OutboxCommit"
                            /\ LET msgId == outboxStagging[(state[self].tx)].msgId IN
                                 outbox' = [outbox EXCEPT ![msgId] = outboxStagging[(state[self].tx)]]
                            /\ pc' = [pc EXCEPT ![self] = "Redo_StateCommit"]
-                           /\ UNCHANGED << inputQueue, store, outboxStagging, 
-                                           output, processed, txId, msg, state, 
-                                           nextState >>
+                           /\ UNCHANGED << inputQueue, outQueue, store, 
+                                           outboxStagging, processed, txId, 
+                                           msg, state, nextState >>
 
 Redo_StateCommit(self) == /\ pc[self] = "Redo_StateCommit"
                           /\ IF store.ver = state[self].ver
@@ -229,9 +229,9 @@ Redo_StateCommit(self) == /\ pc[self] = "Redo_StateCommit"
                                            /\ store' = store
                                 ELSE /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
                                      /\ store' = store
-                          /\ UNCHANGED << inputQueue, outbox, outboxStagging, 
-                                          output, processed, txId, msg, state, 
-                                          nextState >>
+                          /\ UNCHANGED << inputQueue, outQueue, outbox, 
+                                          outboxStagging, processed, txId, msg, 
+                                          state, nextState >>
 
 Process(self) == /\ pc[self] = "Process"
                  /\ IF outbox[msg[self].id] = NULL
@@ -242,13 +242,13 @@ Process(self) == /\ pc[self] = "Process"
                             /\ pc' = [pc EXCEPT ![self] = "StageOutbox"]
                        ELSE /\ pc' = [pc EXCEPT ![self] = "SendAndAck"]
                             /\ UNCHANGED << txId, state >>
-                 /\ UNCHANGED << inputQueue, store, outbox, outboxStagging, 
-                                 output, processed, msg, nextState >>
+                 /\ UNCHANGED << inputQueue, outQueue, store, outbox, 
+                                 outboxStagging, processed, msg, nextState >>
 
 StageOutbox(self) == /\ pc[self] = "StageOutbox"
                      /\ outboxStagging' = [outboxStagging EXCEPT ![txId[self]] = [msgId |-> msg[self].id, ver |-> state[self].ver]]
                      /\ pc' = [pc EXCEPT ![self] = "StateCommit"]
-                     /\ UNCHANGED << inputQueue, store, outbox, output, 
+                     /\ UNCHANGED << inputQueue, outQueue, store, outbox, 
                                      processed, txId, msg, state, nextState >>
 
 StateCommit(self) == /\ pc[self] = "StateCommit"
@@ -259,17 +259,17 @@ StateCommit(self) == /\ pc[self] = "StateCommit"
                                       /\ store' = store
                            ELSE /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
                                 /\ store' = store
-                     /\ UNCHANGED << inputQueue, outbox, outboxStagging, 
-                                     output, processed, txId, msg, state, 
-                                     nextState >>
+                     /\ UNCHANGED << inputQueue, outQueue, outbox, 
+                                     outboxStagging, processed, txId, msg, 
+                                     state, nextState >>
 
 OutboxCommit(self) == /\ pc[self] = "OutboxCommit"
                       /\ LET msgId == outboxStagging[txId[self]].msgId IN
                            outbox' = [outbox EXCEPT ![msgId] = outboxStagging[txId[self]]]
                       /\ pc' = [pc EXCEPT ![self] = "StateCleanup"]
-                      /\ UNCHANGED << inputQueue, store, outboxStagging, 
-                                      output, processed, txId, msg, state, 
-                                      nextState >>
+                      /\ UNCHANGED << inputQueue, outQueue, store, 
+                                      outboxStagging, processed, txId, msg, 
+                                      state, nextState >>
 
 StateCleanup(self) == /\ pc[self] = "StateCleanup"
                       /\ IF store.ver = state[self].ver
@@ -280,12 +280,12 @@ StateCleanup(self) == /\ pc[self] = "StateCleanup"
                                        /\ store' = store
                             ELSE /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
                                  /\ store' = store
-                      /\ UNCHANGED << inputQueue, outbox, outboxStagging, 
-                                      output, processed, txId, msg, state, 
-                                      nextState >>
+                      /\ UNCHANGED << inputQueue, outQueue, outbox, 
+                                      outboxStagging, processed, txId, msg, 
+                                      state, nextState >>
 
 SendAndAck(self) == /\ pc[self] = "SendAndAck"
-                    /\ output' = (output \union {outbox[msg[self].id]})
+                    /\ outQueue' = (outQueue \union {outbox[msg[self].id]})
                     /\ processed' = (processed \union {msg[self]})
                     /\ pc' = [pc EXCEPT ![self] = "MainLoop"]
                     /\ UNCHANGED << inputQueue, store, outbox, outboxStagging, 
@@ -303,6 +303,6 @@ Next == (\E self \in Processes: HandlerThread(self))
 Spec == /\ Init /\ [][Next]_vars
         /\ \A self \in Processes : WF_vars(HandlerThread(self))
 
-\* END TRANSLATION
+\* END TRANSLATION - the hash of the generated TLA code (remove to silence divergence warnings): TLA-254255f319466daf6b3fe4fd46c5aa00
 
 ====

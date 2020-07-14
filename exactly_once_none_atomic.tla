@@ -25,13 +25,13 @@ variables
 
 define 
     InputMessages == [id : MessageIds, dupId : DupIds]
-    outQueueMessages == [msgId : MessageIds, ver : VersionIds]
+    OutQueueMessages == [msgId : MessageIds, ver : VersionIds]
     TypeInvariant == 
         /\ inputQueue \in SUBSET InputMessages
         /\ outQueue \in SUBSET outQueueMessages
         /\ processed \in SUBSET InputMessages
         /\ Range(store) \in SUBSET [ver : VersionIds, msgId : MessageIds \union {NULL}, txId : TxIdx \union {NULL} ]
-        /\ Range(outbox) \in SUBSET (outQueueMessages \union {NULL})
+        /\ Range(outbox) \in SUBSET (OutQueueMessages \union {NULL})
 
     AtMostOneStateChange ==
         \A id \in MessageIds : Cardinality(WithId(Range(store),id)) <= 2
